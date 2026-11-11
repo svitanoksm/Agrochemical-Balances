@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from google.oauth2.service_account import Credentials
 import gspread
 import re
@@ -149,7 +150,8 @@ def load_and_process_data():
 col_date, col_btn = st.columns([5, 1])
 
 with col_date:
-    current_time = datetime.now().strftime("%d.%m.%Y | %H:%M:%S")
+    # Київський час (сервер Streamlit Cloud працює за UTC)
+    current_time = datetime.now(ZoneInfo("Europe/Kyiv")).strftime("%d.%m.%Y | %H:%M:%S")
     st.markdown(f"### 📅 Дата оновлення: `{current_time}`")
 
 with col_btn:
