@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 import pandas as pd
 from datetime import datetime
@@ -543,4 +542,3 @@ else:
             "Загальний залишок",
             f"{total_balance:,.2f}"
         )
-```
