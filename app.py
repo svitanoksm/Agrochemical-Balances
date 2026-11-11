@@ -29,38 +29,64 @@ def load_and_process_data():
         gc = gspread.authorize(creds)
 
         # -----------------------------------------------------------------
-        # НАЛАШТУВАННЯ ДОСТУПУ ДО ОДНІЄЇ ТАБЛИЦІ ТА РІЗНИХ АРКУШІВ
+        # НАЛАШТУВАННЯ ДОСТУПУ ДО ТАБЛИЦІ ТА АРКУШІВ
         # -----------------------------------------------------------------
-        # 1. Вставте сюди єдиний ID вашої Google Таблиці (з її URL-посилання)
         MAIN_SHEET_ID = "1QUh9y-FL_qiYMCRAko8KLxUKjdAdlF63jukcLu45djc"
         
-        # 2. Вкажіть точні назви аркушів (як вони написано у вас у вкладках внизу)
-        SHEET_NAME_WH = "Рух_по_складам_Агроному"          # Наприклад, аркуш видачі зі складу
-        SHEET_NAME_FIELD = "ЛМТ"        # Наприклад, аркуш польових робіт
+        SHEET_NAME_WH = "Рух_по_складам_Агроному"
+        SHEET_NAME_FIELD = "ЛМТ"
         # -----------------------------------------------------------------
 
         # Відкриваємо саму таблицю
         spreadsheet = gc.open_by_key(MAIN_SHEET_ID)
 
-        # Зчитування даних з аркуша «Склад»
-        sh_wh = spreadsheet.worksheet(SHEET_NAME_WH)
-        df_wh = pd.DataFrame(sh_wh.get_all_records())
+        # Зчитування даних з аркушів
+        df_wh = pd.DataFrame(spreadsheet.worksheet(SHEET_NAME_WH).get_all_records())
+        df_field = pd.DataFrame(spreadsheet.worksheet(SHEET_NAME_FIELD).get_all_records())
 
-        # Зчитування даних з аркуша «Поля»
-        sh_field = spreadsheet.worksheet(SHEET_NAME_FIELD)
-        df_field = pd.DataFrame(sh_field.get_all_records())
+        # Конвертація числових полів складу у формат чисел (щоб уникнути помилок з текстовими форматами)
+        df_wh['Постачання_від_Постачальника'] = pd.to_numeric(df_wh['Постачання_від_Постачальника'], errors='coerce').fillna(0) if 'Постачання_від_Постачальника' in df_wh.columns else 0
+        df_wh['Видано_зі_складу'] = pd.to_numeric(df_wh['Видано_зі_складу'], errors='coerce').fillna(0) if 'Видано_зі_складу' in df_wh.columns else 0
+        df_wh['Повернення_в_склад'] = pd.to_numeric(df_wh['Повернення_в_склад'], errors='coerce').fillna(0) if 'Повернення_в_склад' in df_wh.columns else 0
 
-        # Агрегація Отриманого (Склад)
-        # Очікувані назви колонок у таблиці: 'Агроном', 'Назва_ТМЦ', 'Кількість'
-        wh_agg = df_wh.groupby(['Агроном', 'Назва_ТМЦ'], as_index=False)['Кількість'].sum()
-        wh_agg.rename(columns={'Кількість': 'Отримано'}, inplace=True)
+        # Агрегація складу за формулою: Постачання - Видано + Повернення
+        wh_grouped = df_wh.groupby(
+            ['Відповідальний_який_отримав_ТМЦ', 'Номенклатура'], 
+            as_index=False
+        )[['Постачання_від_Постачальника', 'Видано_зі_складу', 'Повернення_в_склад']].sum()
 
-        # Агрегація Внесеного (Поля)
-        field_agg = df_field.groupby(['Агроном', 'Назва_ТМЦ'], as_index=False)['Кількість'].sum()
-        field_agg.rename(columns={'Кількість': 'Внесено'}, inplace=True)
+        wh_grouped['Отримано'] = (
+            wh_grouped['Постачання_від_Постачальника'] 
+            - wh_grouped['Видано_зі_складу'] 
+            + wh_grouped['Повернення_в_склад']
+        )
 
-        # Зведення двох аркушів в один датасет (Left Join)
-        merged = pd.merge(wh_agg, field_agg, on=['Агроном', 'Назва_ТМЦ'], how='left')
+        wh_grouped.rename(columns={
+            'Відповідальний_який_отримав_ТМЦ': 'Агроном',
+            'Номенклатура': 'Препарат'
+        }, inplace=True)
+
+        # Конвертація фактичного внесення в ЛМТ
+        field_col = 'Факт_внесення_на_поле_Добрива_ЗЗР_Насіння_(л_або_т)'
+        if field_col in df_field.columns:
+            df_field[field_col] = pd.to_numeric(df_field[field_col], errors='coerce').fillna(0)
+        else:
+            df_field[field_col] = 0
+
+        # Агрегація фактичного внесення з аркуша ЛМТ
+        field_grouped = df_field.groupby(
+            ['Відповідальний', 'Номенклатура'], 
+            as_index=False
+        )[field_col].sum()
+        
+        field_grouped.rename(columns={
+            'Відповідальний': 'Агроном',
+            'Номенклатура': 'Препарат',
+            field_col: 'Внесено'
+        }, inplace=True)
+
+        # Зведення двох датасетів (Left Join)
+        merged = pd.merge(wh_grouped[['Агроном', 'Препарат', 'Отримано']], field_grouped, on=['Агроном', 'Препарат'], how='left')
         merged['Внесено'] = merged['Внесено'].fillna(0)
 
         # Розрахунок залишку на руках
@@ -96,20 +122,22 @@ df_active, error_msg = load_and_process_data()
 
 if error_msg:
     st.error(f"Помилка завантаження даних: {error_msg}")
-    st.info("Перевірте ID таблиці, назви аркушів у коді та чи надано доступ пошті сервісного акаунта.")
+    st.info("Перевірте назви аркушів, доступ сервісного акаунта та відповідність колонок у таблиці.")
 else:
     if df_active.empty:
-        st.success("🎉 Усі агрономи повністю закрили свої звіти! Незписаних залишків немає, таблиці порожні.")
+        st.success("🎉 Усі агрономи повністю закрили свої звіти! Незписаних залишків немає.")
     else:
         # Отримуємо список агрономів, у яких є залишки
         agronomists_list = df_active['Агроном'].unique()
 
         # Виводимо блок для кожного агронома
         for agronomist in agronomists_list:
-            st.markdown(f"### 👤 Агроном: **{agronomist}**")
+            if not agronomist: 
+                continue
+            st.markdown(f"### 👤 Агроном / Відповідальний: **{agronomist}**")
             
             # Фільтруємо таблицю по конкретному агроному
-            agri_df = df_active[df_active['Агроном'] == agronomist][['Назва_ТМЦ', 'Залишок']]
+            agri_df = df_active[df_active['Агроном'] == agronomist][['Препарат', 'Залишок']]
             agri_df.columns = ['Назва препарату / ТМЦ', 'Залишок на руках']
             
             # Сортуємо за об'ємом залишку
