@@ -18,6 +18,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+
 def clean_name(val):
     """Стандартизація назв номенклатури"""
     if pd.isna(val):
@@ -27,19 +28,31 @@ def clean_name(val):
     text = re.sub(r'\s+', ' ', text)
     return text
 
+
 def parse_ukrainian_number(val):
-    """Корректне перетворення українських чисел з комами та пробілами у float"""
+    """Коректне перетворення українських чисел з комами та пробілами у float"""
     if pd.isna(val) or val == "":
         return 0.0
     val_str = str(val).strip()
-    # Прибираємо нерозривні та звичайні пробіли (типу "10 500" -> "10500")
+    # Прибираємо нерозривні та звичайні пробіли ("10 500" -> "10500")
     val_str = val_str.replace('\xa0', '').replace(' ', '')
-    # Замінюємо кому на крапку для дробових чисел ("69,9" -> "69.9")
+    # Кома -> крапка ("69,9" -> "69.9")
     val_str = val_str.replace(',', '.')
     try:
         return float(val_str)
     except ValueError:
         return 0.0
+
+
+def read_sheet(spreadsheet, sheet_name):
+    """
+    Читає аркуш БЕЗ автоматичної нумерізації gspread.
+    Інакше "69,9" перетворюється на 699 (кома сприймається як роздільник тисяч).
+    Усі значення лишаються рядками, а числа парсимо самі.
+    """
+    ws = spreadsheet.worksheet(sheet_name)
+    return pd.DataFrame(ws.get_all_records(numericise_ignore=['all']))
+
 
 @st.cache_data(ttl=30)
 def load_and_process_data():
@@ -55,19 +68,28 @@ def load_and_process_data():
 
         spreadsheet = gc.open_by_key(MAIN_SHEET_ID)
 
-        # Зчитування даних
-        df_wh = pd.DataFrame(spreadsheet.worksheet(SHEET_NAME_WH).get_all_records())
-        df_field = pd.DataFrame(spreadsheet.worksheet(SHEET_NAME_FIELD).get_all_records())
+        # Зчитування даних (без автоматичної нумерізації)
+        df_wh = read_sheet(spreadsheet, SHEET_NAME_WH)
+        df_field = read_sheet(spreadsheet, SHEET_NAME_FIELD)
 
         # 1. ОБРОБКА СКЛАДУ
-        df_wh['Видано_зі_складу'] = df_wh['Видано_зі_складу'].apply(parse_ukrainian_number) if 'Видано_зі_складу' in df_wh.columns else 0.0
-        df_wh['Повернення_в_склад'] = df_wh['Повернення_в_склад'].apply(parse_ukrainian_number) if 'Повернення_в_склад' in df_wh.columns else 0.0
+        for col in ['Видано_зі_складу', 'Повернення_в_склад']:
+            if col in df_wh.columns:
+                df_wh[col] = df_wh[col].apply(parse_ukrainian_number)
+            else:
+                df_wh[col] = 0.0
 
-        # Відкидаємо порожні назви
+        # Відкидаємо порожні назви та "сміття" (назви лише з цифр, напр. "4")
         df_wh = df_wh[df_wh['Номенклатура'].astype(str).str.strip() != ""]
+        df_wh = df_wh[~df_wh['Номенклатура'].astype(str).str.strip().str.fullmatch(r'[\d.,\s]+')]
         df_wh['Clean_Name'] = df_wh['Номенклатура'].apply(clean_name)
-        
-        name_mapping = df_wh[['Clean_Name', 'Номенклатура']].drop_duplicates().set_index('Clean_Name')['Номенклатура'].to_dict()
+
+        name_mapping = (
+            df_wh[['Clean_Name', 'Номенклатура']]
+            .drop_duplicates('Clean_Name')
+            .set_index('Clean_Name')['Номенклатура']
+            .to_dict()
+        )
 
         wh_grouped = df_wh.groupby('Clean_Name', as_index=False)[
             ['Видано_зі_складу', 'Повернення_в_склад']
@@ -84,10 +106,18 @@ def load_and_process_data():
 
         if name_col_field in df_field.columns:
             df_field = df_field[df_field[name_col_field].astype(str).str.strip() != ""]
+            df_field = df_field[~df_field[name_col_field].astype(str).str.strip().str.fullmatch(r'[\d.,\s]+')]
             df_field['Clean_Name'] = df_field[name_col_field].apply(clean_name)
-            
-            field_name_mapping = df_field[['Clean_Name', name_col_field]].drop_duplicates().set_index('Clean_Name')[name_col_field].to_dict()
-            name_mapping.update(field_name_mapping)
+
+            field_name_mapping = (
+                df_field[['Clean_Name', name_col_field]]
+                .drop_duplicates('Clean_Name')
+                .set_index('Clean_Name')[name_col_field]
+                .to_dict()
+            )
+            # Назви зі складу (довідник) мають пріоритет над назвами з ЛМТ
+            for k, v in field_name_mapping.items():
+                name_mapping.setdefault(k, v)
         else:
             df_field['Clean_Name'] = ""
 
@@ -101,14 +131,17 @@ def load_and_process_data():
         merged['Внесено'] = merged['Внесено'].fillna(0.0)
 
         merged['Препарат'] = merged['Clean_Name'].map(name_mapping)
-        merged['Залишок'] = merged['Видано_зі_складу'] - merged['Повернення_в_склад'] - merged['Внесено']
+        merged['Залишок'] = (
+            merged['Видано_зі_складу'] - merged['Повернення_в_склад'] - merged['Внесено']
+        ).round(3)
 
         # Фільтр: приховуємо тільки чіткі нулі
-        active_rests = merged[abs(merged['Залишок']) > 0.001].copy()
+        active_rests = merged[merged['Залишок'].abs() > 0.001].copy()
 
         return active_rests, None
     except Exception as e:
         return None, str(e)
+
 
 # --------------------------------------------------------
 # ВЕРХНЯ ПАНЕЛЬ
@@ -137,10 +170,15 @@ if error_msg:
     st.error(f"Помилка завантаження даних: {error_msg}")
 else:
     if df_active.empty:
-        st.success("🎉 Усі ТМЦ повністю зписані або використані! Залишків на руках немає.")
+        st.success("🎉 Усі ТМЦ повністю списані або використані! Залишків на руках немає.")
     else:
-        display_df = df_active[['Препарат', 'Видано_зі_складу', 'Повернення_в_склад', 'Внесено', 'Залишок']].copy()
-        display_df.columns = ['Назва препарату / ТМЦ', 'Видано зі складу', 'Повернення', 'Внесено на поля', 'Залишок на руках']
+        display_df = df_active[
+            ['Препарат', 'Видано_зі_складу', 'Повернення_в_склад', 'Внесено', 'Залишок']
+        ].copy()
+        display_df.columns = [
+            'Назва препарату / ТМЦ', 'Видано зі складу', 'Повернення',
+            'Внесено на поля', 'Залишок на руках'
+        ]
         display_df = display_df.sort_values(by='Залишок на руках', ascending=False)
 
         st.dataframe(
