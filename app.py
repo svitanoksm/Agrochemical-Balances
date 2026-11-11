@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 import pandas as pd
 from datetime import datetime
@@ -27,7 +28,7 @@ st.markdown("""
 
 
 # ============================================================
-# 2. НОРМАЛІЗАЦІЯ НАЗВ
+# 2. НОРМАЛІЗАЦІЯ НАЗВ ПРЕПАРАТІВ
 # ============================================================
 
 def clean_name(val):
@@ -37,20 +38,37 @@ def clean_name(val):
 
     text = str(val).upper().strip()
 
-    # Нерозривні пробіли замінюємо звичайними
+    # Заміна нерозривних пробілів
     text = text.replace('\xa0', ' ')
 
-    # Прибираємо реєстраційні символи
+    # Видалення реєстраційних символів
     text = re.sub(r'[®™©]', '', text)
 
-    # Прибираємо зайві пробіли
+    # Видалення зайвих пробілів
     text = re.sub(r'\s+', ' ', text)
 
     return text.strip()
 
 
 # ============================================================
-# 3. ЗАВАНТАЖЕННЯ ТА ОБРОБКА ДАНИХ
+# 3. ПЕРЕТВОРЕННЯ ЧИСЛОВИХ ДАНИХ
+# ============================================================
+
+def convert_numeric(series):
+
+    series = series.astype(str).str.strip()
+
+    # Підтримка десяткової коми
+    series = series.str.replace(',', '.', regex=False)
+
+    return pd.to_numeric(
+        series,
+        errors='coerce'
+    ).fillna(0)
+
+
+# ============================================================
+# 4. ЗАВАНТАЖЕННЯ ТА ОБРОБКА ДАНИХ
 # ============================================================
 
 @st.cache_data(ttl=30)
@@ -66,7 +84,9 @@ def load_and_process_data():
             "https://www.googleapis.com/auth/spreadsheets.readonly"
         ]
 
-        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds_dict = dict(
+            st.secrets["gcp_service_account"]
+        )
 
         creds = Credentials.from_service_account_info(
             creds_dict,
@@ -75,38 +95,62 @@ def load_and_process_data():
 
         gc = gspread.authorize(creds)
 
+        # ID таблиці
         MAIN_SHEET_ID = "1QUh9y-FL_qiYMCRAko8KLxUKjdAdlF63jukcLu45djc"
 
+        # Назви аркушів
         SHEET_NAME_WH = "Рух_по_складам_Агроному"
         SHEET_NAME_FIELD = "ЛМТ"
 
-        spreadsheet = gc.open_by_key(MAIN_SHEET_ID)
+        spreadsheet = gc.open_by_key(
+            MAIN_SHEET_ID
+        )
 
         # ----------------------------------------------------
         # ЗЧИТУВАННЯ ДАНИХ
         # ----------------------------------------------------
 
         df_wh = pd.DataFrame(
-            spreadsheet.worksheet(SHEET_NAME_WH).get_all_records()
+            spreadsheet.worksheet(
+                SHEET_NAME_WH
+            ).get_all_records()
         )
 
         df_field = pd.DataFrame(
-            spreadsheet.worksheet(SHEET_NAME_FIELD).get_all_records()
+            spreadsheet.worksheet(
+                SHEET_NAME_FIELD
+            ).get_all_records()
         )
 
         # ----------------------------------------------------
-        # ПЕРЕВІРКА ОБОВ'ЯЗКОВИХ КОЛОНОК
+        # НАЗВИ КОЛОНОК
+        # ----------------------------------------------------
+
+        # Аркуш складу
+        wh_name_col = 'Номенклатура'
+        wh_issued_col = 'Видано_зі_складу'
+        wh_return_col = 'Повернення_в_склад'
+
+        # Аркуш ЛМТ
+        field_name_col = 'Найменування_добрив_ЗЗР_сорт_насіння'
+
+        field_amount_col = (
+            'Факт_внесення_на_поле_Добрива_ЗЗР_Насіння_(л_або_т)'
+        )
+
+        # ----------------------------------------------------
+        # ПЕРЕВІРКА НАЯВНОСТІ КОЛОНОК
         # ----------------------------------------------------
 
         required_wh = [
-            'Номенклатура',
-            'Видано_зі_складу',
-            'Повернення_в_склад'
+            wh_name_col,
+            wh_issued_col,
+            wh_return_col
         ]
 
         required_field = [
-            'Номенклатура',
-            'Факт_внесення_на_поле_Добрива_ЗЗР_Насіння_(л_або_т)'
+            field_name_col,
+            field_amount_col
         ]
 
         missing_wh = [
@@ -121,92 +165,88 @@ def load_and_process_data():
 
         if missing_wh:
             raise ValueError(
-                f"Відсутні колонки на аркуші складу: {missing_wh}"
+                f"На аркуші складу відсутні колонки: {missing_wh}"
             )
 
         if missing_field:
             raise ValueError(
-                f"Відсутні колонки на аркуші ЛМТ: {missing_field}"
+                f"На аркуші ЛМТ відсутні колонки: {missing_field}"
             )
 
         # ----------------------------------------------------
-        # ПЕРЕТВОРЕННЯ ЧИСЛОВИХ ДАНИХ
+        # ОБРОБКА ЧИСЛОВИХ ДАНИХ
         # ----------------------------------------------------
 
-        def convert_numeric(series):
-
-            # Підтримка десяткової коми
-            series = series.astype(str).str.replace(
-                ',', '.', regex=False
-            )
-
-            return pd.to_numeric(
-                series,
-                errors='coerce'
-            ).fillna(0)
-
-        df_wh['Видано_зі_складу'] = convert_numeric(
-            df_wh['Видано_зі_складу']
+        df_wh[wh_issued_col] = convert_numeric(
+            df_wh[wh_issued_col]
         )
 
-        df_wh['Повернення_в_склад'] = convert_numeric(
-            df_wh['Повернення_в_склад']
+        df_wh[wh_return_col] = convert_numeric(
+            df_wh[wh_return_col]
         )
 
-        field_col = (
-            'Факт_внесення_на_поле_Добрива_ЗЗР_Насіння_(л_або_т)'
-        )
-
-        df_field[field_col] = convert_numeric(
-            df_field[field_col]
+        df_field[field_amount_col] = convert_numeric(
+            df_field[field_amount_col]
         )
 
         # ----------------------------------------------------
-        # НОРМАЛІЗАЦІЯ НОМЕНКЛАТУРИ
+        # НОРМАЛІЗАЦІЯ НАЗВ
         # ----------------------------------------------------
 
-        df_wh['Clean_Name'] = df_wh['Номенклатура'].apply(
-            clean_name
-        )
+        df_wh['Clean_Name'] = df_wh[
+            wh_name_col
+        ].apply(clean_name)
 
-        df_field['Clean_Name'] = df_field['Номенклатура'].apply(
-            clean_name
-        )
+        df_field['Clean_Name'] = df_field[
+            field_name_col
+        ].apply(clean_name)
 
-        # Прибираємо порожню номенклатуру
-        df_wh = df_wh[df_wh['Clean_Name'] != ""].copy()
+        # Видалення порожніх назв
+        df_wh = df_wh[
+            df_wh['Clean_Name'] != ""
+        ].copy()
 
         df_field = df_field[
             df_field['Clean_Name'] != ""
         ].copy()
 
         # ----------------------------------------------------
-        # АГРЕГАЦІЯ СКЛАДУ
+        # ГРУПУВАННЯ ДАНИХ СКЛАДУ
         # ----------------------------------------------------
 
         wh_grouped = df_wh.groupby(
             'Clean_Name',
             as_index=False
         )[
-            ['Видано_зі_складу', 'Повернення_в_склад']
+            [wh_issued_col, wh_return_col]
         ].sum()
 
+        wh_grouped.rename(
+            columns={
+                wh_issued_col: 'Видано_зі_складу',
+                wh_return_col: 'Повернення_в_склад'
+            },
+            inplace=True
+        )
+
         # ----------------------------------------------------
-        # АГРЕГАЦІЯ ФАКТИЧНОГО ВНЕСЕННЯ
+        # ГРУПУВАННЯ ДАНИХ ЛМТ
         # ----------------------------------------------------
 
         field_grouped = df_field.groupby(
             'Clean_Name',
             as_index=False
-        )[field_col].sum()
+        )[field_amount_col].sum()
 
         field_grouped.rename(
-            columns={field_col: 'Внесено'},
+            columns={
+                field_amount_col: 'Внесено'
+            },
             inplace=True
         )
 
         # ----------------------------------------------------
-        # ФОРМУВАННЯ ДОВІДНИКА НАЗВ
+        # ФОРМУВАННЯ НАЗВ ДЛЯ ВІДОБРАЖЕННЯ
         # ----------------------------------------------------
 
         name_mapping = {}
@@ -216,27 +256,27 @@ def load_and_process_data():
             key = row['Clean_Name']
 
             if key not in name_mapping:
-                name_mapping[key] = row['Номенклатура']
+                name_mapping[key] = row[wh_name_col]
 
         for _, row in df_field.iterrows():
 
             key = row['Clean_Name']
 
             if key not in name_mapping:
-                name_mapping[key] = row['Номенклатура']
+                name_mapping[key] = row[field_name_col]
 
         # ----------------------------------------------------
-        # ОБ'ЄДНАННЯ ДАНИХ
+        # ОБ'ЄДНАННЯ ДВОХ АРКУШІВ
         # ----------------------------------------------------
 
         merged = pd.merge(
             wh_grouped,
             field_grouped,
             on='Clean_Name',
-            how='outer',
-            indicator=True
+            how='outer'
         )
 
+        # Відсутні значення замінюємо нулями
         merged['Видано_зі_складу'] = (
             merged['Видано_зі_складу'].fillna(0)
         )
@@ -250,12 +290,16 @@ def load_and_process_data():
         )
 
         # ----------------------------------------------------
-        # РОЗРАХУНОК ЗАЛИШКУ
+        # ВІДНОВЛЕННЯ НАЗВ ПРЕПАРАТІВ
         # ----------------------------------------------------
 
-        merged['Препарат'] = merged['Clean_Name'].map(
-            name_mapping
-        )
+        merged['Препарат'] = merged[
+            'Clean_Name'
+        ].map(name_mapping)
+
+        # ----------------------------------------------------
+        # РОЗРАХУНОК ЗАЛИШКІВ
+        # ----------------------------------------------------
 
         merged['Залишок'] = (
             merged['Видано_зі_складу']
@@ -264,48 +308,42 @@ def load_and_process_data():
         )
 
         # ----------------------------------------------------
-        # ДІАГНОСТИКА АГРІТОКСУ
-        # ----------------------------------------------------
-
-        test_name = clean_name("АГРІТОКС®")
-
-        diagnostic = merged[
-            merged['Clean_Name'] == test_name
-        ].copy()
-
-        # ----------------------------------------------------
         # ФОРМУВАННЯ РЕЗУЛЬТАТІВ
         # ----------------------------------------------------
 
+        # Позитивні залишки
         active_rests = merged[
             merged['Залишок'] > 0.01
         ].copy()
 
+        # Від'ємні залишки для контролю
         negative_rests = merged[
             merged['Залишок'] < -0.01
         ].copy()
 
-        unmatched = merged[
-            merged['_merge'] != 'both'
-        ].copy()
+        # Номенклатура, яка є тільки на одному аркуші
+        unmatched_names = sorted(
+            set(wh_grouped['Clean_Name'])
+            .symmetric_difference(
+                set(field_grouped['Clean_Name'])
+            )
+        )
 
-        return {
-            'active': active_rests,
-            'negative': negative_rests,
-            'merged': merged,
-            'diagnostic': diagnostic,
-            'unmatched': unmatched,
-            'wh_grouped': wh_grouped,
-            'field_grouped': field_grouped
-        }, None
+        return (
+            active_rests,
+            negative_rests,
+            unmatched_names,
+            merged,
+            None
+        )
 
     except Exception as e:
 
-        return None, str(e)
+        return None, None, None, None, str(e)
 
 
 # ============================================================
-# 4. ВЕРХНЯ ПАНЕЛЬ
+# 5. ВЕРХНЯ ПАНЕЛЬ
 # ============================================================
 
 col_date, col_btn = st.columns([5, 1])
@@ -322,16 +360,20 @@ with col_date:
 
 with col_btn:
 
-    if st.button("🔄 Оновити дані", type="primary"):
+    if st.button(
+        "🔄 Оновити дані",
+        type="primary"
+    ):
 
         st.cache_data.clear()
         st.rerun()
+
 
 st.divider()
 
 
 # ============================================================
-# 5. ОСНОВНИЙ ДАШБОРД
+# 6. ОСНОВНИЙ ДАШБОРД
 # ============================================================
 
 st.markdown(
@@ -339,10 +381,16 @@ st.markdown(
 )
 
 st.caption(
-    "Розрахунок: Видано зі складу − Повернення в склад − Фактичне внесення"
+    "Видано зі складу − Повернення в склад − Фактичне внесення на поле"
 )
 
-data, error_msg = load_and_process_data()
+(
+    df_active,
+    df_negative,
+    unmatched_names,
+    df_all,
+    error_msg
+) = load_and_process_data()
 
 
 if error_msg:
@@ -352,16 +400,14 @@ if error_msg:
     )
 
     st.info(
-        "Перевірте Google Sheets, доступ сервісного акаунта "
-        "та назви колонок."
+        "Перевірте назви аркушів, доступ сервісного акаунта "
+        "та відповідність назв колонок Google Таблиці."
     )
 
 else:
 
-    df_active = data['active']
-
     # --------------------------------------------------------
-    # ОСНОВНА ТАБЛИЦЯ
+    # ОСНОВНА ТАБЛИЦЯ ЗАЛИШКІВ
     # --------------------------------------------------------
 
     if df_active.empty:
@@ -393,78 +439,6 @@ else:
         )
 
     # --------------------------------------------------------
-    # ДІАГНОСТИКА АГРІТОКСУ
-    # --------------------------------------------------------
-
-    with st.expander(
-        "🔍 Діагностика Агрітоксу",
-        expanded=True
-    ):
-
-        diagnostic = data['diagnostic']
-
-        if diagnostic.empty:
-
-            st.warning(
-                "Агрітокс не знайдений у результатах об'єднання."
-            )
-
-        else:
-
-            st.dataframe(
-                diagnostic[
-                    [
-                        'Препарат',
-                        'Видано_зі_складу',
-                        'Повернення_в_склад',
-                        'Внесено',
-                        'Залишок',
-                        '_merge'
-                    ]
-                ],
-                use_container_width=True,
-                hide_index=True
-            )
-
-        st.caption(
-            "Статус об'єднання: both — назва знайдена на обох аркушах; "
-            "left_only — тільки склад; right_only — тільки ЛМТ."
-        )
-
-    # --------------------------------------------------------
-    # ПОЗИЦІЇ З НЕЗБІГОМ НОМЕНКЛАТУРИ
-    # --------------------------------------------------------
-
-    with st.expander(
-        "⚠️ Номенклатура, яка не збіглася між аркушами"
-    ):
-
-        unmatched = data['unmatched']
-
-        if unmatched.empty:
-
-            st.success(
-                "Уся номенклатура збігається."
-            )
-
-        else:
-
-            st.dataframe(
-                unmatched[
-                    [
-                        'Препарат',
-                        'Видано_зі_складу',
-                        'Повернення_в_склад',
-                        'Внесено',
-                        'Залишок',
-                        '_merge'
-                    ]
-                ],
-                use_container_width=True,
-                hide_index=True
-            )
-
-    # --------------------------------------------------------
     # ВІД'ЄМНІ ЗАЛИШКИ
     # --------------------------------------------------------
 
@@ -472,9 +446,7 @@ else:
         "🔴 Контроль від'ємних залишків"
     ):
 
-        negative = data['negative']
-
-        if negative.empty:
+        if df_negative.empty:
 
             st.success(
                 "Від'ємних залишків немає."
@@ -482,41 +454,71 @@ else:
 
         else:
 
+            negative_display = df_negative[
+                [
+                    'Препарат',
+                    'Видано_зі_складу',
+                    'Повернення_в_склад',
+                    'Внесено',
+                    'Залишок'
+                ]
+            ].copy()
+
             st.dataframe(
-                negative[
-                    [
-                        'Препарат',
-                        'Видано_зі_складу',
-                        'Повернення_в_склад',
-                        'Внесено',
-                        'Залишок'
-                    ]
-                ],
+                negative_display,
                 use_container_width=True,
                 hide_index=True
             )
 
     # --------------------------------------------------------
-    # КОНТРОЛЬНИЙ ПІДСУМОК
+    # КОНТРОЛЬ НЕЗБІГУ НОМЕНКЛАТУРИ
+    # --------------------------------------------------------
+
+    with st.expander(
+        "⚠️ Номенклатура, яка є тільки на одному аркуші"
+    ):
+
+        if not unmatched_names:
+
+            st.success(
+                "Уся номенклатура присутня на обох аркушах."
+            )
+
+        else:
+
+            st.warning(
+                f"Знайдено позицій без відповідності: {len(unmatched_names)}"
+            )
+
+            st.dataframe(
+                pd.DataFrame({
+                    'Номенклатура': unmatched_names
+                }),
+                use_container_width=True,
+                hide_index=True
+            )
+
+    # --------------------------------------------------------
+    # ЗАГАЛЬНИЙ КОНТРОЛЬНИЙ ПІДСУМОК
     # --------------------------------------------------------
 
     with st.expander(
         "📊 Загальний контроль розрахунків"
     ):
 
-        total_issued = data['merged'][
+        total_issued = df_all[
             'Видано_зі_складу'
         ].sum()
 
-        total_returned = data['merged'][
+        total_returned = df_all[
             'Повернення_в_склад'
         ].sum()
 
-        total_used = data['merged'][
+        total_used = df_all[
             'Внесено'
         ].sum()
 
-        total_balance = data['merged'][
+        total_balance = df_all[
             'Залишок'
         ].sum()
 
@@ -541,3 +543,4 @@ else:
             "Загальний залишок",
             f"{total_balance:,.2f}"
         )
+```
